@@ -8,6 +8,9 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
+import com.example.enrollment.enrollment.domain.EnrollmentStatus;
+import com.example.enrollment.enrollment.dto.CourseStudentResponse;
+import com.example.enrollment.enrollment.service.EnrollmentService;
 
 /**
  * 강의 API.
@@ -19,6 +22,7 @@ import org.springframework.web.bind.annotation.*;
 public class CourseController {
 
 	private final CourseService courseService;
+	private final EnrollmentService enrollmentService;
 
 	/** 강의 등록 */
 	@PostMapping
@@ -54,5 +58,17 @@ public class CourseController {
 		@RequestParam(defaultValue = "20") int size
 	) {
 		return courseService.getList(status, cursor, size);
+	}
+
+	/** 강의별 수강생 목록 조회 (강사 전용) */
+	@GetMapping("/{courseId}/enrollments")
+	public CursorPage<CourseStudentResponse> getCourseStudents(
+		@RequestHeader("X-Member-Id") Long memberId,
+		@PathVariable Long courseId,
+		@RequestParam(required = false) EnrollmentStatus status,
+		@RequestParam(required = false) Long cursor,
+		@RequestParam(defaultValue = "20") int size
+	) {
+		return enrollmentService.getCourseStudents(memberId, courseId, status, cursor, size);
 	}
 }

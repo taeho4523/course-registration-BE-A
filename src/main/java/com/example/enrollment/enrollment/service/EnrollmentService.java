@@ -15,6 +15,9 @@ import org.springframework.transaction.annotation.Transactional;
 import com.example.enrollment.common.response.CursorPage;
 import com.example.enrollment.enrollment.dto.MyEnrollmentResponse;
 import org.springframework.data.domain.Limit;
+import com.example.enrollment.enrollment.dto.CourseStudentResponse;
+import com.example.enrollment.member.domain.Member;
+import com.example.enrollment.member.repository.MemberRepository;
 
 import java.util.List;
 
@@ -28,6 +31,7 @@ public class EnrollmentService {
 
 	private final EnrollmentRepository enrollmentRepository;
 	private final CourseRepository courseRepository;
+	private final MemberRepository memberRepository;
 
 	// 활성 상태(중복 신청 판단 기준)
 	private static final List<EnrollmentStatus> ACTIVE_STATUSES =
@@ -156,6 +160,49 @@ public class EnrollmentService {
 			.toList();
 
 		return CursorPage.of(content, size, MyEnrollmentResponse::enrollmentId);
+	}
+
+	/**
+	 * 강의별 수강생 목록 조회 (강사 전용).
+	 * 요청자가 해당 강의의 강사인지 검증한 뒤, 신청 목록에 수강생 이름을 채워 반환한다.
+	 */
+	@Transactional(readOnly = true)
+	public CursorPage<CourseStudentResponse> getCourseStudents(
+		Long requesterId, Long courseId, EnrollmentStatus status, Long cursor, int size) {
+
+		// 강의 존재 + 요청자가 강사 본인인지 검증
+		Course course = courseRepository.findById(courseId)
+			.orElseThrow(() -> new BusinessException(ErrorCode.COURSE_NOT_FOUND));
+		if (!course.getCreatorId().equals(requesterId)) {
+			throw new BusinessException(ErrorCode.FORBIDDEN);
+		}
+
+		long effectiveCursor = (cursor != null) ? cursor : Long.MAX_VALUE;
+		Limit limit = Limit.of(size + 1);
+
+		List<Enrollment> enrollments = (status != null)
+			? enrollmentRepository.findByCourseIdAndStatusAndIdLessThanOrderByIdDesc(
+			courseId, status, effectiveCursor, limit)
+			: enrollmentRepository.findByCourseIdAndIdLessThanOrderByIdDesc(
+			courseId, effectiveCursor, limit);
+
+		// 수강생 이름을 한 번에 조회 (N+1 방지) — 내 신청 목록과 동일한 패턴
+		List<Long> memberIds = enrollments.stream().map(Enrollment::getMemberId).distinct().toList();
+		var memberNameMap = memberRepository.findAllById(memberIds).stream()
+			.collect(java.util.stream.Collectors.toMap(Member::getId, Member::getName));
+
+		List<CourseStudentResponse> content = enrollments.stream()
+			.map(e -> new CourseStudentResponse(
+				e.getId(),
+				e.getMemberId(),
+				memberNameMap.get(e.getMemberId()),
+				e.getStatus(),
+				e.getEnrolledAt(),
+				e.getConfirmedAt()
+			))
+			.toList();
+
+		return CursorPage.of(content, size, CourseStudentResponse::enrollmentId);
 	}
 
 }
