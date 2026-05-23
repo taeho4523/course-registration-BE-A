@@ -1,0 +1,22 @@
+spring:
+  datasource:
+    # H2 인메모리. MySQL 모드로 동작시켜 방언 차이를 최소화.
+    url: jdbc:h2:mem:enrollment;MODE=MySQL;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    properties:
+      hibernate:
+        format_sql: true
+    show-sql: true
+    open-in-view: false
+
+enrollment:
+  cancel:
+    period-days: 7
+  waitlist:
+    payment-deadline-hours: 24

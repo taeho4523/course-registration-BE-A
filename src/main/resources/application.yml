@@ -1,0 +1,42 @@
+spring:
+  application:
+    name: enrollment
+
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/enrollment?serverTimezone=Asia/Seoul&characterEncoding=UTF-8
+    username: ${DB_USERNAME:enrollment}
+    password: ${DB_PASSWORD:enrollment}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    hibernate:
+      # 개발 편의를 위해 시작 시 스키마 자동 생성. 운영 전환 시 validate 또는 Flyway 권장.
+      ddl-auto: create
+    properties:
+      hibernate:
+        format_sql: true
+        # 비관적 락 타임아웃(ms). 락 대기가 길어지면 예외로 빠르게 실패시켜 스레드 고갈 방지.
+        jakarta:
+          persistence:
+            lock:
+              timeout: 3000
+    show-sql: true
+    open-in-view: false
+
+  jackson:
+    # KST 기준 ISO-8601 직렬화
+    time-zone: Asia/Seoul
+    serialization:
+      write-dates-as-timestamps: false
+
+server:
+  port: 8080
+
+# 비즈니스 규칙 설정값 (하드코딩 대신 외부화하여 변경 가능성 반영)
+enrollment:
+  cancel:
+    # 결제 확정(CONFIRMED) 후 취소 가능 기간 (일)
+    period-days: 7
+  waitlist:
+    # 대기열 승격 후 결제 기한 (시간)
+    payment-deadline-hours: 24
