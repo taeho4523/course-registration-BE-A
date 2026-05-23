@@ -11,7 +11,7 @@ spring:
   jpa:
     hibernate:
       # 개발 편의를 위해 시작 시 스키마 자동 생성. 운영 전환 시 validate 또는 Flyway 권장.
-      ddl-auto: create
+      ddl-auto: update
     properties:
       hibernate:
         format_sql: true
