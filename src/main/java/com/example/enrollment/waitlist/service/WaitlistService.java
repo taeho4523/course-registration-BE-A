@@ -13,6 +13,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.example.enrollment.enrollment.domain.Enrollment;
 import com.example.enrollment.enrollment.repository.EnrollmentRepository;
+import com.example.enrollment.enrollment.domain.EnrollmentStatus;
+import java.time.LocalDateTime;
+import java.util.List;
+import org.springframework.beans.factory.annotation.Value;
 
 /**
  * 대기열 비즈니스 로직.
@@ -25,6 +29,8 @@ public class WaitlistService {
 	private final CourseRepository courseRepository;
 	private final EnrollmentRepository enrollmentRepository;
 
+	@Value("${enrollment.waitlist.payment-deadline-hours}")
+	private int paymentDeadlineHours;
 	/**
 	 * 대기 등록.
 	 * 정원에 여유가 있으면 대기가 아니라 바로 신청해야 하므로 거부한다.
@@ -110,5 +116,58 @@ public class WaitlistService {
 			.findByCourseIdAndMemberIdAndStatus(courseId, memberId, WaitlistStatus.WAITING)
 			.orElseThrow(() -> new BusinessException(ErrorCode.WAITLIST_NOT_FOUND));
 		return WaitlistResponse.from(entry);
+	}
+
+	/**
+	 * 승격됐지만 결제 기한이 지난 대기 항목들을 만료 처리한다. (스케줄러가 호출)
+	 *
+	 * 각 대상에 대해:
+	 *  1) 연결된 신청(courseId+memberId의 PENDING)이 아직 결제 안 됐는지 확인
+	 *     - 이미 CONFIRMED면 결제 완료한 것이므로 만료시키지 않음 (구멍 방지)
+	 *  2) 미결제(PENDING)면: 신청을 취소 처리 + 카운터 감소 + 대기 항목 EXPIRED
+	 *  3) 그 자리에 다음 대기자를 다시 승격
+	 *
+	 * @return 만료 처리된 건수
+	 */
+	@Transactional
+	public int expireOverduePromotions() {
+		LocalDateTime deadline = LocalDateTime.now().minusHours(paymentDeadlineHours);
+
+		List<WaitlistEntry> overdue = waitlistRepository
+			.findByStatusAndPromotedAtBefore(WaitlistStatus.PROMOTED, deadline);
+
+		int expiredCount = 0;
+		for (WaitlistEntry entry : overdue) {
+			Long courseId = entry.getCourseId();
+			Long memberId = entry.getMemberId();
+
+			// 1) 연결된 활성 신청 조회. 승격 시 PENDING으로 생성했으므로 그걸 찾는다.
+			var enrollmentOpt = enrollmentRepository
+				.findByCourseIdAndMemberIdAndStatusIn(
+					courseId, memberId, List.of(EnrollmentStatus.PENDING))
+				.stream().findFirst();
+
+			// 이미 결제(CONFIRMED)했거나 신청이 없으면 만료 대상 아님 → 대기 항목만 정리
+			if (enrollmentOpt.isEmpty()) {
+				continue;
+			}
+
+			// 2) 미결제 PENDING → 취소 처리
+			var enrollment = enrollmentOpt.get();
+			enrollment.cancel(0); // 승격 신청 만료는 기간 제한 없이 즉시 취소
+
+			// 카운터 감소 (락)
+			Course course = courseRepository.findByIdForUpdate(courseId)
+				.orElseThrow(() -> new BusinessException(ErrorCode.COURSE_NOT_FOUND));
+			course.decreaseEnrolledCount();
+
+			// 대기 항목 EXPIRED
+			entry.expire();
+			expiredCount++;
+
+			// 3) 다음 대기자 승격 (자리가 났으므로)
+			promoteNextIfAvailable(courseId);
+		}
+		return expiredCount;
 	}
 }

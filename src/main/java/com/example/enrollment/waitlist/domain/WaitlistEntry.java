@@ -48,6 +48,10 @@ public class WaitlistEntry {
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
 
+    // 승격된 시각. 승격 후 결제 기한 계산의 기준점. 승격 전엔 null.
+    @Column(name = "promoted_at")
+    private LocalDateTime promotedAt;
+
     public WaitlistEntry(Long courseId, Long memberId, int position) {
         this.courseId = courseId;
         this.memberId = memberId;
@@ -56,11 +60,11 @@ public class WaitlistEntry {
         this.createdAt = LocalDateTime.now();
     }
 
-    /** 자리가 나서 신청으로 전환됨 */
+    /** 자리가 나서 신청으로 전환됨. 승격 시각을 기록한다. */
     public void promote() {
         this.status = WaitlistStatus.PROMOTED;
+        this.promotedAt = LocalDateTime.now();
     }
-
     /** 대기 취소 또는 기한 만료 */
     public void expire() {
         this.status = WaitlistStatus.EXPIRED;

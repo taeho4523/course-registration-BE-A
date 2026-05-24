@@ -8,6 +8,7 @@ import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -48,4 +49,11 @@ public interface WaitlistRepository extends JpaRepository<WaitlistEntry, Long> {
 	 * 이들을 만료시키고 다음 대기자를 승격한다.
 	 */
 	List<WaitlistEntry> findByStatus(WaitlistStatus status);
+
+	/**
+	 * 결제 기한이 지난 PROMOTED 항목 조회 (스케줄러용).
+	 * promotedAt이 기준 시각(deadline)보다 이전인 것들 = 기한 초과.
+	 */
+	List<WaitlistEntry> findByStatusAndPromotedAtBefore(
+		WaitlistStatus status, LocalDateTime deadline);
 }

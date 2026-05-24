@@ -43,4 +43,10 @@ public interface EnrollmentRepository extends JpaRepository<Enrollment, Long> {
 	 */
 	List<Enrollment> findByCourseIdAndStatusAndIdLessThanOrderByIdDesc(
 		Long courseId, EnrollmentStatus status, Long cursor, Limit limit);
+
+	/**
+	 * 특정 강의+멤버의 특정 상태 신청들 조회.
+	 */
+	List<Enrollment> findByCourseIdAndMemberIdAndStatusIn(
+		Long courseId, Long memberId, List<EnrollmentStatus> statuses);
 }

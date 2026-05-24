@@ -40,3 +40,5 @@ enrollment:
   waitlist:
     # 대기열 승격 후 결제 기한 (시간)
     payment-deadline-hours: 24
+    expire-scan-interval-ms: 60000 #1분마다 만료 스캔
+
