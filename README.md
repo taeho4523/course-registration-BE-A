@@ -1,412 +1,163 @@
-# course-registration-BE-A
+# 수강 신청 시스템 (BE-A)
+
 ## 프로젝트 개요
+
+온라인 강의 수강 신청 시스템입니다. 크리에이터가 강의를 개설하고, 수강생의 신청/결제/취소 흐름을 다룹니다. 핵심 과제는 정원 초과 없이 동시 신청을 안전하게 처리하는 **동시성 제어**이며, 비관적 락 기반 구현 후 실제 MySQL 환경에서 동시성 테스트로 검증하였습니다. 정원 마감 시 대기열에 등록하고, 취소로 자리가 나면 자동 승격되는 기능을 포함합니다.
+
 ## 기술 스택
+
+- **언어/프레임워크**: Java 21, Spring Boot 3.3.5
+- **DB / ORM**: MySQL 8.0, Spring Data JPA (Hibernate)
+- **테스트**: JUnit 5, Mockito, Testcontainers
+- **빌드/실행**: Gradle, Docker Compose
+
+**JPA를 택한 이유**: Mybatis보다 제게 비교적 친숙하고, 비관적 락을 `@Lock`으로 선언적으로 다룰 수 있어 동시성 제어 의도가 코드에 명확히 드러납니다.
+
+**MySQL을 택한 이유**: H2 인메모리는 비관적 락 동작이 실제 DB와 다를 수 있어, 동시성 검증의 신뢰성을 위해 운영과 동일한 MySQL을 사용했습니다. (동시성 통합 테스트도 Testcontainers로 실제 MySQL에서 수행)
+
 ## 실행 방법
+
+```bash
+# 1) MySQL 실행 (Docker)
+docker compose up -d
+
+# 2) 애플리케이션 실행
+./gradlew bootRun
+# 또는 IDE에서 EnrollmentApplication 실행
+```
+
+- 기본 포트: `8080`
+- 인증: `X-Member-Id` 헤더로 사용자 식별 (예: `-H "X-Member-Id: 1"`)
+- 스키마는 시작 시 자동 생성됩니다 (개발 `update`, 테스트 `create`).
+
 ## 요구사항 해석 및 가정
+
+- **인증/인가**: 과제 허용 범위에 따라 `X-Member-Id` 헤더로 사용자를 식별합니다. 별도 로그인/토큰 인증은 구현하지 않았습니다.
+- **취소 가능 기간의 기준 시점**: "결제 후 7일 이내 취소 가능"을 **결제 확정 시각(confirmedAt) 기준**으로 해석했습니다. 결제 전(PENDING) 상태는 기간 제한 없이 취소 가능하도록 했습니다.
+- **중복 신청**: 같은 사용자가 같은 강의에 활성 상태(PENDING/CONFIRMED) 신청을 중복 보유할 수 없도록 막았습니다. 단, 취소(CANCELLED) 후 재신청은 허용했습니다.
+- **결제 시스템**: 과제 명세대로 실제 결제 연동 없이 상태 변경(PENDING → CONFIRMED)으로 대체했습니다.
+
+
+### 중요하게 검증한 시나리오
+
+- **마지막 한 자리 동시 신청**: 정원의 마지막 자리에 다수가 동시 신청해도 정확히 정원만큼만 성공해야 함 → 비관적 락으로 보장, 통합 테스트로 검증.
+- **취소로 빈 자리에 대기자 자동 승격**: 수강 취소로 자리가 나면 대기 1번이 자동으로 PENDING 신청으로 전환됨.
+- **승격 후 미결제 시 다음 사람으로 승계**: 승격된 신청이 결제 기한 내 미결제 시, 스케줄러가 만료시키고 다음 대기자를 승격.
+- **취소 기간의 기준 시점**: 과제 문구상 모호한 "결제 후 7일"을, 신청 시점이 아닌 **결제 확정(confirmedAt) 시점** 기준으로 해석하는 것이 비즈니스 의미에 맞다고 판단.
+
 ## 설계 결정과 이유
-## 미구현 / 제약사항
-## AI 활용 범위
-## 데이터 모델 설명
+
+### 1. 정원 동시성 제어 — enrolledCount 카운터 + 비관적 락
+
+동시에 여러 명이 마지막 한 자리에 신청할 때 정원을 초과해선 안됩니다. Course 엔티티에 `enrolledCount` 카운터를 두고, 신청 시 해당 강의 행을 잠근 뒤 정원을 확인/증가시킵니다. 락이 트랜잭션 종료까지 유지되므로 동시 요청은 한 번에 하나씩 직렬화되어, 정확히 정원만큼만 성공합니다.
+
+- **비관적 락 선택 이유**: 인기 강의의 마지막 자리는 충돌이 잦은 상황입니다. 낙관적 락은 충돌이 드물 때 유리하지만, 충돌이 잦으면 버전 충돌로 재시도가 폭증합니다. 충돌이 예상되는 신청 지점에는 비관적 락이 적합합니다.
+- **분산락을 사용하지 않은 이유**: 강의별로 락이 분산되고(강의 A·B의 락은 무관) 강의당 동시 신청 규모가 단일 자원 폭주 수준은 아니라 판단했고, DB 비관적 락으로 충분합니다. 트래픽이 임계치를 넘는다면 고려할 수 있을 것 같습니다.
+- **검증**: 정원 3명 강의에 10명/100명이 동시 신청하는 통합 테스트(Testcontainers, 실제 MySQL)로 항상 정원만큼만 성공함을 확인했습니다.
+### 2. 상태 전이를 enum 화이트리스트로 강제
+
+강의(DRAFT→OPEN→CLOSED)와 신청(PENDING→CONFIRMED→CANCELLED)의 상태 전이를, 서비스에 if를 연발하지 않고 enum에 응집시켜 잘못된 전이를 한곳에서 막습니다. 
+
+### 3. 비즈니스 규칙을 엔티티에 캡슐화
+
+정원 증감(초과 시 예외), 취소 기간 검증을 서비스가 아닌 엔티티 안에 두었습니다. 서비스는 흐름 조율·권한 검증·DTO 변환을 담당하고, 도메인 객체가 자기 불변식을 스스로 보호합니다.
+
+### 4. 커서 기반 페이지네이션
+
+offset 방식 대신 커서(마지막 id 기준)를 사용합니다. offset은 뒤 페이지로 갈수록 느려지고 데이터 변동 시 항목이 밀리지만, 커서는 성능이 일정하고 그 문제가 없습니다. `size + 1`개를 조회해 별도 COUNT 쿼리 없이 다음 페이지 존재를 판단합니다.
+
+### 5. N+1 방지
+
+목록 조회에서 연관 데이터(강의 제목, 수강생 이름)를 항목마다 조회하지 않고, id를 모아 IN 쿼리(`findAllById`)로 한 번에 가져와 Map으로 매핑합니다.
+
+### 6. 대기열 승격은 PENDING 경유
+
+자리가 나면 대기자를 바로 확정하지 않고 PENDING으로 만들어 결제 기한을 부여합니다. "결제 없이 확정"이라는 규칙 위반을 막기 위함입니다. 승격·취소 모두 Course 카운터를 건드리므로 일관되게 비관적 락으로 보호합니다.
+
+### 7. 승격 결제 기한을 WaitlistEntry에 기록
+
+"승격 후 결제 기한"은 일반 신청에 없는 대기열 고유 개념이라, Enrollment가 아닌 WaitlistEntry의 책임(`promotedAt`)으로 두었습니다. 스케줄러는 이를 기준으로 만료를 판단하되, 연결된 신청이 이미 CONFIRMED면 만료시키지 않아 결제한 사람을 잘못 쫓아내는 상황을 방지합니다.
+
+### 8. 설정값 외부화
+
+취소 기간(7일), 승격 결제 기한(24시간), 스케줄러 주기를 `application.yml`로 분리해 코드 수정 없이 변경할 수 있게 했습니다. (과제의 변경 가능성을 설계에 반영에 대한 요구 대응)
+
+## 데이터 모델
+![img.png](img.png)
+4개의 핵심 엔티티로 구성됩니다.
+
+- **Member**: 사용자. 강사(CREATOR)와 수강생(STUDENT)을 별도 테이블로 나누지 않고 `role`로 구분. 한 사람이 강사이면서 다른 강의의 수강생일 수 있기 때문.
+- **Course**: 강의. `enrolledCount`(현재 신청 인원 카운터)와 `status`(DRAFT/OPEN/CLOSED) 보유. 정원 동시성 제어의 락 대상.
+- **Enrollment**: 수강 신청. `status`(PENDING/CONFIRMED/CANCELLED)와 세 시점(enrolledAt/confirmedAt/cancelledAt) 기록. confirmedAt·cancelledAt은 해당 상태 전엔 null.
+- **WaitlistEntry**: 대기열 항목. 순번(position), 상태(WAITING/PROMOTED/EXPIRED), 승격 시각(promotedAt) 보유.
+
+**관계**: Member 1:N Course(강사) · Member 1:N Enrollment · Course 1:N Enrollment · Course 1:N WaitlistEntry · Member 1:N WaitlistEntry
+
+**연관관계 매핑 방침**: JPA 연관관계(@ManyToOne 등) 대신 id 값 참조(courseId, memberId)를 사용했습니다. 도메인 간 결합도를 낮추고 불필요한 지연 로딩·N+1을 원천 차단하기 위함이며, 연관 데이터가 필요하면 명시적으로 조회합니다.
+
+## API 목록 및 예시
+
+상세 명세는 [API_SPEC.md](./API_SPEC.md)를 참고하세요. 주요 엔드포인트 요약:
+
+| 메서드 | 경로 | 설명 |
+|---|---|---|
+| POST | /api/courses | 강의 등록 |
+| PATCH | /api/courses/{id}/status | 강의 상태 변경 |
+| GET | /api/courses | 강의 목록 (상태 필터, 페이지네이션) |
+| GET | /api/courses/{id} | 강의 상세 |
+| GET | /api/courses/{id}/enrollments | 강의별 수강생 목록 (강사 전용) |
+| POST | /api/courses/{id}/enrollments | 수강 신청 |
+| POST | /api/enrollments/{id}/confirm | 결제 확정 |
+| POST | /api/enrollments/{id}/cancel | 수강 취소 |
+| GET | /api/enrollments/me | 내 신청 목록 |
+| POST | /api/courses/{id}/waitlist | 대기 등록 |
+| GET | /api/courses/{id}/waitlist/me | 내 대기 순번 |
+
+### 빠른 시작 시나리오 (복사해서 실행)
+
+```bash
+# 1) 강의 등록 (강사 = member 1)
+curl -X POST http://localhost:8080/api/courses \
+  -H "Content-Type: application/json" -H "X-Member-Id: 1" \
+  -d '{"title":"Spring Boot 입문","price":50000,"capacity":30,"startAt":"2025-06-01T00:00:00","endAt":"2025-07-31T23:59:59"}'
+
+# 2) 모집 시작 (DRAFT → OPEN) — 위 응답의 id를 사용
+curl -X PATCH http://localhost:8080/api/courses/1/status \
+  -H "Content-Type: application/json" -H "X-Member-Id: 1" -d '{"status":"OPEN"}'
+
+# 3) 수강 신청 (수강생 = member 5)
+curl -X POST http://localhost:8080/api/courses/1/enrollments -H "X-Member-Id: 5"
+
+# 4) 결제 확정 — 위 응답의 enrollmentId를 사용
+curl -X POST http://localhost:8080/api/enrollments/1/confirm -H "X-Member-Id: 5"
+
+# 5) 내 신청 목록
+curl "http://localhost:8080/api/enrollments/me" -H "X-Member-Id: 5"
+```
+주요 기능별 호출 예시를 시나리오별로 [기능별_호출예시.md](./기능별_호출예시.md) 에 추가해놓았습니다.
 ## 테스트 실행 방법
-# API 명세
 
-수강 신청 시스템의 REST API 명세입니다. 모든 요청/응답 본문은 `application/json`이며, 시각은 ISO-8601(KST, `+09:00`) 형식을 따릅니다.
-
-## 공통 사항
-
-### 인증
-
-별도 인증/인가 없이 요청 헤더로 사용자를 식별합니다.
-
-```
-X-Member-Id: 1
+```bash
+./gradlew test
 ```
 
-해당 헤더가 없거나 존재하지 않는 멤버이면 `401 Unauthorized`를 반환합니다.
-
-### 공통 에러 응답
-
-모든 에러는 아래 형식으로 통일합니다.
-
-```json
-{
-  "code": "CAPACITY_EXCEEDED",
-  "message": "정원이 초과되어 신청할 수 없습니다."
-}
-```
-
-| HTTP 상태 | 의미 |
-|---|---|
-| 400 Bad Request | 요청 형식 오류, 잘못된 상태 전이, 취소 가능 기간 초과 |
-| 401 Unauthorized | 멤버 식별 실패 |
-| 403 Forbidden | 권한 없음 (예: 타인의 강의 수강생 목록 조회) |
-| 404 Not Found | 존재하지 않는 리소스 |
-| 409 Conflict | 정원 초과, 중복 신청 |
-
-### 페이지네이션
-
-목록 조회는 커서 기반 페이지네이션을 사용합니다.
-
-| 파라미터 | 타입 | 기본값 | 설명 |
-|---|---|---|---|
-| `cursor` | long | (없음) | 마지막으로 받은 항목의 id. 미전달 시 처음부터 |
-| `size` | int | 20 | 페이지 크기 (최대 100) |
-
-응답 공통 구조:
-
-```json
-{
-  "content": [ ... ],
-  "nextCursor": 42,
-  "hasNext": true
-}
-```
-
-`hasNext`가 `false`이면 마지막 페이지이며 `nextCursor`는 `null`입니다.
-
----
-
-## 1. 강의 (Course)
-
-### 1.1 강의 등록
-
-```
-POST /api/courses
-X-Member-Id: 1
-```
-
-요청
-
-```json
-{
-  "title": "Spring Boot 입문",
-  "description": "스프링 부트 기초부터 실전까지",
-  "price": 50000,
-  "capacity": 30,
-  "startAt": "2025-06-01T00:00:00+09:00",
-  "endAt": "2025-07-31T23:59:59+09:00"
-}
-```
-
-| 필드 | 타입 | 필수 | 설명 |
-|---|---|---|---|
-| title | string | O | 강의명 (최대 100자) |
-| description | string | X | 강의 설명 |
-| price | int | O | 가격 (원 단위 정수, 0 이상) |
-| capacity | int | O | 최대 정원 (1 이상) |
-| startAt | datetime | O | 수강 시작일 |
-| endAt | datetime | O | 수강 종료일 (startAt 이후) |
-
-응답 `201 Created`
-
-```json
-{
-  "id": 1,
-  "creatorId": 1,
-  "title": "Spring Boot 입문",
-  "description": "스프링 부트 기초부터 실전까지",
-  "price": 50000,
-  "capacity": 30,
-  "enrolledCount": 0,
-  "status": "DRAFT",
-  "startAt": "2025-06-01T00:00:00+09:00",
-  "endAt": "2025-07-31T23:59:59+09:00"
-}
-```
-
-등록 직후 상태는 항상 `DRAFT`이며, 헤더의 멤버가 강사(creator)로 지정됩니다.
-
-### 1.2 강의 상태 변경
-
-```
-PATCH /api/courses/{id}/status
-X-Member-Id: 1
-```
-
-요청
-
-```json
-{ "status": "OPEN" }
-```
-
-허용되는 전이는 `DRAFT → OPEN → CLOSED` 단방향뿐입니다. 역방향이나 단계 건너뛰기(`DRAFT → CLOSED`)는 `400`을 반환합니다. 해당 강의의 강사가 아니면 `403`입니다.
-
-응답 `200 OK` — 변경된 강의 전체를 1.1과 동일한 형태로 반환합니다.
-
-| 상태 | 의미 | 신청 가능 여부 |
-|---|---|---|
-| DRAFT | 초안 | 불가 |
-| OPEN | 모집 중 | 가능 |
-| CLOSED | 모집 마감 | 불가 |
-
-### 1.3 강의 목록 조회
-
-```
-GET /api/courses?status=OPEN&cursor=&size=20
-```
-
-| 쿼리 파라미터 | 타입 | 필수 | 설명 |
-|---|---|---|---|
-| status | string | X | 상태 필터 (DRAFT/OPEN/CLOSED). 미전달 시 전체 |
-| cursor | long | X | 페이지네이션 커서 |
-| size | int | X | 페이지 크기 |
-
-응답 `200 OK`
-
-```json
-{
-  "content": [
-    {
-      "id": 1,
-      "title": "Spring Boot 입문",
-      "creatorId": 1,
-      "price": 50000,
-      "capacity": 30,
-      "enrolledCount": 12,
-      "status": "OPEN"
-    }
-  ],
-  "nextCursor": 1,
-  "hasNext": false
-}
-```
-
-### 1.4 강의 상세 조회
-
-```
-GET /api/courses/{id}
-```
-
-응답 `200 OK`
-
-```json
-{
-  "id": 1,
-  "creatorId": 1,
-  "title": "Spring Boot 입문",
-  "description": "스프링 부트 기초부터 실전까지",
-  "price": 50000,
-  "capacity": 30,
-  "enrolledCount": 12,
-  "remainingCount": 18,
-  "status": "OPEN",
-  "startAt": "2025-06-01T00:00:00+09:00",
-  "endAt": "2025-07-31T23:59:59+09:00"
-}
-```
-
-`remainingCount`(잔여 정원) = `capacity - enrolledCount`. 존재하지 않으면 `404`.
-
-### 1.5 강의별 수강생 목록 조회 (강사 전용)
-
-```
-GET /api/courses/{id}/enrollments?status=CONFIRMED&cursor=&size=20
-X-Member-Id: 1
-```
-
-해당 강의의 강사만 조회할 수 있으며, 아니면 `403`. `status`로 신청 상태 필터링이 가능합니다.
-
-응답 `200 OK`
-
-```json
-{
-  "content": [
-    {
-      "enrollmentId": 100,
-      "memberId": 5,
-      "memberName": "김수강",
-      "status": "CONFIRMED",
-      "enrolledAt": "2025-06-02T10:00:00+09:00",
-      "confirmedAt": "2025-06-02T10:05:00+09:00"
-    }
-  ],
-  "nextCursor": 100,
-  "hasNext": false
-}
-```
-
----
-
-## 2. 수강 신청 (Enrollment)
-
-### 2.1 수강 신청
-
-```
-POST /api/courses/{id}/enrollments
-X-Member-Id: 5
-```
-
-요청 본문 없음. 헤더의 멤버가 신청자입니다.
-
-응답 `201 Created`
-
-```json
-{
-  "enrollmentId": 100,
-  "courseId": 1,
-  "memberId": 5,
-  "status": "PENDING",
-  "enrolledAt": "2025-06-02T10:00:00+09:00"
-}
-```
-
-**처리 규칙**
-
-- 강의 상태가 `OPEN`이 아니면 `400` (`COURSE_NOT_OPEN`).
-- 정원이 가득 차면(`enrolledCount >= capacity`) `409` (`CAPACITY_EXCEEDED`).
-- 동일 멤버가 같은 강의에 활성(`PENDING`/`CONFIRMED`) 신청을 이미 보유하면 `409` (`ALREADY_ENROLLED`).
-- 정원 확인과 카운터 증가는 Course 행에 비관적 락(`SELECT ... FOR UPDATE`)을 건 단일 트랜잭션 안에서 처리하여, 동시에 마지막 한 자리에 다수가 신청해도 정확히 정원만큼만 성공합니다.
-
-### 2.2 결제 확정
-
-```
-POST /api/enrollments/{id}/confirm
-X-Member-Id: 5
-```
-
-실제 결제 연동 없이 상태만 변경합니다. `PENDING → CONFIRMED` 전이만 허용하며, 이미 `CANCELLED`이거나 `CONFIRMED`이면 `400` (`INVALID_STATE_TRANSITION`).
-
-응답 `200 OK`
-
-```json
-{
-  "enrollmentId": 100,
-  "courseId": 1,
-  "memberId": 5,
-  "status": "CONFIRMED",
-  "enrolledAt": "2025-06-02T10:00:00+09:00",
-  "confirmedAt": "2025-06-02T10:05:00+09:00"
-}
-```
-
-### 2.3 수강 취소
-
-```
-POST /api/enrollments/{id}/cancel
-X-Member-Id: 5
-```
-
-응답 `200 OK`
-
-```json
-{
-  "enrollmentId": 100,
-  "courseId": 1,
-  "memberId": 5,
-  "status": "CANCELLED",
-  "enrolledAt": "2025-06-02T10:00:00+09:00",
-  "confirmedAt": "2025-06-02T10:05:00+09:00",
-  "cancelledAt": "2025-06-05T09:00:00+09:00"
-}
-```
-
-**처리 규칙**
-
-- `PENDING`(결제 전)은 기간 제한 없이 취소 가능합니다.
-- `CONFIRMED`(확정)는 `confirmedAt` 기준 7일 이내에만 취소 가능하며, 초과 시 `400` (`CANCEL_PERIOD_EXPIRED`).
-- 이미 `CANCELLED`이면 `400` (`INVALID_STATE_TRANSITION`).
-- 취소 시 Course의 `enrolledCount`를 1 감소시키며(동일 트랜잭션), 대기열에 대기자가 있으면 1번 대기자를 승격합니다(2.5 참조).
-
-### 2.4 내 수강 신청 목록 조회
-
-```
-GET /api/enrollments/me?status=CONFIRMED&cursor=&size=20
-X-Member-Id: 5
-```
-
-헤더 멤버 기준 신청 목록을 반환합니다. `status` 필터 선택.
-
-응답 `200 OK`
-
-```json
-{
-  "content": [
-    {
-      "enrollmentId": 100,
-      "courseId": 1,
-      "courseTitle": "Spring Boot 입문",
-      "status": "CONFIRMED",
-      "enrolledAt": "2025-06-02T10:00:00+09:00",
-      "confirmedAt": "2025-06-02T10:05:00+09:00",
-      "cancelledAt": null
-    }
-  ],
-  "nextCursor": 100,
-  "hasNext": false
-}
-```
-
-### 2.5 상태 전이 규칙
-
-허용되는 전이만 정의하고 나머지는 모두 `400`으로 거부합니다.
-
-| 현재 상태 | 가능한 다음 상태 | 트리거 |
-|---|---|---|
-| PENDING | CONFIRMED | 결제 확정 |
-| PENDING | CANCELLED | 취소 |
-| CONFIRMED | CANCELLED | 취소 (7일 이내) |
-| CANCELLED | (없음) | — |
-
----
-
-## 3. 대기열 (Waitlist) — 선택 구현
-
-정원이 가득 찬 강의에 대기 등록하고, 자리가 나면 순번대로 승격합니다.
-
-### 3.1 대기 등록
-
-```
-POST /api/courses/{id}/waitlist
-X-Member-Id: 7
-```
-
-응답 `201 Created`
-
-```json
-{
-  "waitlistId": 200,
-  "courseId": 1,
-  "memberId": 7,
-  "position": 3,
-  "status": "WAITING"
-}
-```
-
-- 강의 정원이 아직 남아 있으면 `400` (`CAPACITY_AVAILABLE`) — 대기가 아니라 바로 신청해야 합니다.
-- 이미 대기 중이면 `409` (`ALREADY_WAITING`).
-- `position`은 현재 대기열의 마지막 순번 + 1입니다.
-
-### 3.2 내 대기 순번 조회
-
-```
-GET /api/courses/{id}/waitlist/me
-X-Member-Id: 7
-```
-
-응답 `200 OK`
-
-```json
-{
-  "waitlistId": 200,
-  "courseId": 1,
-  "position": 3,
-  "status": "WAITING"
-}
-```
-
-### 3.3 승격 동작 (내부 처리)
-
-별도 엔드포인트가 아니라 취소(2.3)로 자리가 났을 때 내부적으로 트리거됩니다.
-
-1. `position`이 가장 앞선 `WAITING` 대기자를 선택합니다.
-2. 해당 대기자의 Enrollment를 `PENDING` 상태로 생성하고 결제 기한(예: 24시간)을 부여합니다.
-3. 대기 항목 상태를 `PROMOTED`로 변경합니다.
-4. 기한 내 결제(2.2)하면 `CONFIRMED`, 미결제 시 스케줄러가 해당 PENDING을 만료 처리하고 다음 대기자를 승격합니다.
-
-> 승격을 곧바로 `CONFIRMED`로 만들지 않는 이유: 결제 없이 수강 확정되는 것은 비즈니스 규칙 위반이므로, 반드시 `PENDING`을 거쳐 결제 기한을 부여합니다.
-
-| 대기 상태 | 의미 |
-|---|---|
-| WAITING | 대기 중 (순번 보유) |
-| PROMOTED | 자리 발생으로 신청(PENDING) 전환됨 |
-| EXPIRED | 기한 내 미결제 또는 대기 취소 |
+- **Docker가 실행 중이어야 합니다.** 동시성 통합 테스트가 Testcontainers로 실제 MySQL 컨테이너를 띄우기 때문입니다.
+- 테스트 구성:
+  - **도메인 단위 테스트**: 상태 전이, 정원 증감, 취소 기간 검증 등 비즈니스 규칙
+  - **서비스 단위 테스트**(Mockito): 중복 신청·권한·대기 승격 등 분기 로직
+  - **컨트롤러 테스트**(@WebMvcTest): 요청/응답 매핑, 검증 실패 처리
+  - **레포지토리 테스트**(@DataJpaTest): 커서 페이지네이션, 조회 쿼리
+  - **동시성 통합 테스트**(Testcontainers): 정원 3명에 10명/100명 동시 신청 시 오버부킹이 없음을 검증
+
+## 미구현 / 제약사항
+
+- **ddl-auto 사용**: 개발 편의를 위해 JPA `ddl-auto`로 스키마를 자동 생성합니다(개발 update, 테스트 create). 운영에서는 `validate` + Flyway/Liquibase로 전환해야 합니다.
+- **인증/인가 간소화**: `X-Member-Id` 헤더 방식이라 실제 보안은 없습니다. 운영에서는 JWT/OAuth2 등으로 대체가 필요합니다.
+- **대기 순번의 구멍**: 중간 대기자가 승격/만료되면 순번에 빈 번호가 생길 수 있으나, 승격은 항상 position 최소값을 선택하므로 동작에는 영향이 없습니다.
+- **취소 시 Course 락 재진입**: cancel에서 Course 락을 건 뒤 승격 로직에서 같은 Course를 다시 조회합니다. 같은 트랜잭션이라 안전하지만, course 객체를 전달하는 방식으로 리팩토링할 여지가 있습니다.
+- **잘못된 path variable 처리**: 숫자가 아닌 경로 변수는 현재 500으로 처리됩니다. 타입 불일치 예외를 400으로 변환하는 핸들러를 추가하면 개선됩니다.
+- **스케줄러의 다중 인스턴스 한계**: 현재 스케줄러는 단일 인스턴스를 가정합니다. 여러 인스턴스로 확장 시 중복 실행을 막아야 합니다.
+
+## AI 활용 범위
+
+설계와 구현 과정에서 AI를 페어 프로그래밍 파트너로 활용했습니다. 설계 방향 논의, 코드 초안 작성, 트레이드오프 검토, 디버깅에 활용했습니다. 코드작성과 문서화, 트레이드 오프 장단점 고민에 많은 도움을 받은듯합니다. 다만 기술 선택(비관적 락, 커서 페이지네이션, 대기열 승격 구조 등)은 직접 이해하고 판단하였습니다. 동시성/대기열 등 핵심 동작을 포함한 모든 테스트를 작성/실행해 검증했습니다(Testcontainers 드라이버 설정 충돌을 함께 디버깅하여 해결). 
