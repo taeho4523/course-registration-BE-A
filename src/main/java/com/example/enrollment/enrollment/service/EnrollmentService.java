@@ -18,6 +18,7 @@ import org.springframework.data.domain.Limit;
 import com.example.enrollment.enrollment.dto.CourseStudentResponse;
 import com.example.enrollment.member.domain.Member;
 import com.example.enrollment.member.repository.MemberRepository;
+import com.example.enrollment.waitlist.service.WaitlistService;
 
 import java.util.List;
 
@@ -32,6 +33,7 @@ public class EnrollmentService {
 	private final EnrollmentRepository enrollmentRepository;
 	private final CourseRepository courseRepository;
 	private final MemberRepository memberRepository;
+	private final WaitlistService waitlistService;
 
 	// 활성 상태(중복 신청 판단 기준)
 	private static final List<EnrollmentStatus> ACTIVE_STATUSES =
@@ -104,9 +106,13 @@ public class EnrollmentService {
 		enrollment.cancel(cancelPeriodDays);
 
 		// 자리가 하나 비므로 강의 카운터 감소. 락으로 보호.
-		Course course = courseRepository.findByIdForUpdate(enrollment.getCourseId())
+		Long courseId = enrollment.getCourseId();
+		Course course = courseRepository.findByIdForUpdate(courseId)
 			.orElseThrow(() -> new BusinessException(ErrorCode.COURSE_NOT_FOUND));
 		course.decreaseEnrolledCount();
+
+		// 자리가 났으니 대기자가 있으면 1번을 승격 (PENDING 신청 생성 + 카운터 회수)
+		waitlistService.promoteNextIfAvailable(courseId);
 
 		return EnrollmentResponse.from(enrollment);
 	}
